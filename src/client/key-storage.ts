@@ -5,9 +5,9 @@
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { webcrypto } from 'node:crypto';
-import { importJWK, exportJWK, type JWK } from 'jose';
+import { exportJWK, type JWK } from 'jose';
 
 const STORAGE_DIR = join(process.cwd(), '.demo-keys');
 const STORAGE_FILE = join(STORAGE_DIR, 'client-keys.json');

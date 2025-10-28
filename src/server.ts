@@ -130,7 +130,7 @@ app.use('/v1', verifySignatureMiddleware, demoRoutes);
 /**
  * Error handling middleware
  */
-app.use((err: any, req: Request, res: Response, next: any) => {
+app.use((err: any, req: Request, res: Response, _next: any) => {
   logger.error({ err }, 'Unhandled error');
 
   res.status(err.status || 500).json({
