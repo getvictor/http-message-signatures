@@ -64,49 +64,13 @@ export async function verifySignatureMiddleware(
     return;
   }
 
-  // Parse signature input to get parameters
+  // Parse signature input to get components for logging
   const signatureParams = parseSignatureInput(signatureInputHeader as string);
 
   if (!signatureParams) {
     logFailure(keyRecord.clientId, kid, 'invalid_signature_input', [], endpoint, method);
     res.status(401).json(SignatureErrors.invalidSignature('Invalid Signature-Input format'));
     return;
-  }
-
-  // Verify timestamp parameters
-  const now = Math.floor(Date.now() / 1000);
-  const CLOCK_SKEW_SECONDS = 5 * 60; // 5 minutes
-
-  if (signatureParams.created) {
-    // Check if signature was created in the future
-    if (signatureParams.created > now + CLOCK_SKEW_SECONDS) {
-      logFailure(
-        keyRecord.clientId,
-        kid,
-        'signature_in_future',
-        signatureParams.components || [],
-        endpoint,
-        method
-      );
-      res.status(401).json(SignatureErrors.invalidSignature('Signature created in the future'));
-      return;
-    }
-  }
-
-  if (signatureParams.expires) {
-    // Check if signature has expired
-    if (signatureParams.expires < now - CLOCK_SKEW_SECONDS) {
-      logFailure(
-        keyRecord.clientId,
-        kid,
-        'signature_expired',
-        signatureParams.components || [],
-        endpoint,
-        method
-      );
-      res.status(401).json(SignatureErrors.signatureExpired());
-      return;
-    }
   }
 
   // Verify Content-Digest if present
@@ -226,6 +190,9 @@ export async function verifySignatureMiddleware(
     };
 
     // Verify the signature using the library
+    // Library handles timestamp validation (created/expires) with tolerance
+    const CLOCK_SKEW_SECONDS = 5 * 60; // 5 minutes
+
     const verificationResult = await httpbis.verifyMessage(
       {
         keyLookup: async (params) => {
@@ -239,6 +206,7 @@ export async function verifySignatureMiddleware(
           }
           return null;
         },
+        tolerance: CLOCK_SKEW_SECONDS, // Clock skew tolerance for timestamps
       },
       message
     );
@@ -285,28 +253,4 @@ export async function verifySignatureMiddleware(
     res.status(401).json(SignatureErrors.invalidSignature(error.message || 'Verification error'));
     return;
   }
-}
-
-/**
- * Factory function to create verification middleware with options
- */
-export function createVerifyMiddleware(options?: {
-  required?: boolean;
-}) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    if (options?.required === false) {
-      // Optional signature verification
-      // If signature is present, verify it. If not, continue anyway.
-      const hasSignature = req.headers['signature-input'] && req.headers['signature'];
-
-      if (hasSignature) {
-        return await verifySignatureMiddleware(req, res, next);
-      } else {
-        next();
-      }
-    } else {
-      // Required signature verification (default)
-      await verifySignatureMiddleware(req, res, next);
-    }
-  };
 }

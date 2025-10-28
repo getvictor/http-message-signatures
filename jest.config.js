@@ -17,6 +17,6 @@ export default {
     'node_modules/(?!(jose|@misskey-dev|@lapo)/)',
   ],
   testMatch: ['**/*.spec.ts'],
-  testPathIgnorePatterns: ['/node_modules/', 'rfc9421.spec.ts'],
+  testPathIgnorePatterns: ['/node_modules/'],
   collectCoverageFrom: ['src/**/*.ts', '!src/**/*.spec.ts'],
 };
