@@ -73,6 +73,21 @@ export async function verifySignatureMiddleware(
     return;
   }
 
+  // Check for nonce parameter (optional but recommended for replay protection)
+  if (signatureParams.nonce) {
+    // Check if nonce has been used before (replay detection)
+    if (db.isNonceUsed(signatureParams.nonce)) {
+      logFailure(keyRecord.clientId, kid, 'replay_detected', signatureParams.components || [], endpoint, method);
+      res.status(401).json({
+        type: 'https://datatracker.ietf.org/doc/html/rfc9421#section-2.3',
+        title: 'Replay Attack Detected',
+        status: 401,
+        detail: 'The nonce has already been used. This request appears to be a replay attack.',
+      });
+      return;
+    }
+  }
+
   // Verify Content-Digest if present
   if (contentDigestHeader && req.rawBody) {
     const digestValid = verifyDigest(req.rawBody, contentDigestHeader as string);
@@ -223,6 +238,16 @@ export async function verifySignatureMiddleware(
       );
       res.status(401).json(SignatureErrors.invalidSignature('Signature verification failed'));
       return;
+    }
+
+    // Store the nonce to prevent replay (if present)
+    if (signatureParams.nonce) {
+      // Use the expires parameter if available, otherwise use created + 5 minutes
+      const expiresAt = signatureParams.expires
+        ? new Date(signatureParams.expires * 1000)
+        : new Date((signatureParams.created || Math.floor(Date.now() / 1000)) * 1000 + 5 * 60 * 1000);
+
+      db.storeNonce(signatureParams.nonce, expiresAt, keyRecord.clientId, kid);
     }
 
     // Log successful verification

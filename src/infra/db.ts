@@ -42,6 +42,14 @@ export interface SecretValue {
   updatedAt: Date;
 }
 
+export interface NonceRecord {
+  nonce: string;
+  expiresAt: Date;
+  usedAt: Date;
+  clientId: string;
+  kid: string;
+}
+
 /**
  * In-memory database
  */
@@ -50,6 +58,8 @@ class Database {
   private keys = new Map<string, KeyRecord>();
   private audit: AuditEntry[] = [];
   private secrets = new Map<string, SecretValue>();
+  private nonces = new Map<string, NonceRecord>();
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
   // Client operations
   createClient(name: string): ClientRecord {
@@ -189,12 +199,92 @@ class Database {
     return true;
   }
 
+  // Nonce operations for replay protection
+  constructor() {
+    // Start periodic cleanup of expired nonces (every minute)
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupExpiredNonces();
+    }, 60 * 1000);
+  }
+
+  /**
+   * Check if a nonce has been used before
+   * Returns true if nonce was already used (replay detected)
+   */
+  isNonceUsed(nonce: string): boolean {
+    const record = this.nonces.get(nonce);
+    if (!record) {
+      return false;
+    }
+
+    // If nonce exists and hasn't expired yet, it's a replay
+    const now = new Date();
+    return record.expiresAt > now;
+  }
+
+  /**
+   * Store a nonce to prevent replay
+   */
+  storeNonce(nonce: string, expiresAt: Date, clientId: string, kid: string): void {
+    const record: NonceRecord = {
+      nonce,
+      expiresAt,
+      usedAt: new Date(),
+      clientId,
+      kid,
+    };
+
+    this.nonces.set(nonce, record);
+  }
+
+  /**
+   * Clean up expired nonces to prevent memory bloat
+   */
+  private cleanupExpiredNonces(): void {
+    const now = new Date();
+    const toDelete: string[] = [];
+
+    for (const [nonce, record] of this.nonces.entries()) {
+      if (record.expiresAt <= now) {
+        toDelete.push(nonce);
+      }
+    }
+
+    for (const nonce of toDelete) {
+      this.nonces.delete(nonce);
+    }
+
+    if (toDelete.length > 0) {
+      console.log(`🧹 Cleaned up ${toDelete.length} expired nonces`);
+    }
+  }
+
+  /**
+   * Get nonce statistics
+   */
+  getNonceStats(): { total: number; expired: number } {
+    const now = new Date();
+    let expired = 0;
+
+    for (const record of this.nonces.values()) {
+      if (record.expiresAt <= now) {
+        expired++;
+      }
+    }
+
+    return {
+      total: this.nonces.size,
+      expired,
+    };
+  }
+
   // Utility methods for demo
   clear(): void {
     this.clients.clear();
     this.keys.clear();
     this.audit = [];
     this.secrets.clear();
+    this.nonces.clear();
   }
 
   getStats(): {
@@ -202,13 +292,25 @@ class Database {
     keys: number;
     auditEntries: number;
     secrets: number;
+    nonces: number;
   } {
     return {
       clients: this.clients.size,
       keys: this.keys.size,
       auditEntries: this.audit.length,
       secrets: this.secrets.size,
+      nonces: this.nonces.size,
     };
+  }
+
+  /**
+   * Clean up resources
+   */
+  shutdown(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
   }
 }
 

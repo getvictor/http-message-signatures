@@ -14,7 +14,10 @@
     "lint:fix": "eslint . --fix",
     "demo:enroll": "tsx src/client/demo-enroll.ts",
     "demo:good": "tsx src/client/demo-good.ts",
-    "demo:bad": "tsx src/client/demo-bad.ts"
+    "demo:bad": "tsx src/client/demo-bad.ts",
+    "demo:bad-body-digest": "tsx src/client/demo-bad-body-digest.ts",
+    "demo:bad-method": "tsx src/client/demo-bad-method.ts",
+    "demo:bad-replay": "tsx src/client/demo-bad-replay.ts"
   },
   "dependencies": {
     "express": "^5.1.0",

@@ -58,12 +58,14 @@ export function parseSignatureInput(signatureInputHeader: string): {
   algorithm?: string;
   created?: number;
   expires?: number;
+  nonce?: string;
 } | null {
   try {
     const keyIdMatch = signatureInputHeader.match(/keyid="([^"]+)"/);
     const algMatch = signatureInputHeader.match(/alg="([^"]+)"/);
     const createdMatch = signatureInputHeader.match(/created=(\d+)/);
     const expiresMatch = signatureInputHeader.match(/expires=(\d+)/);
+    const nonceMatch = signatureInputHeader.match(/nonce="([^"]+)"/);
 
     // Extract components from the parentheses
     const componentsMatch = signatureInputHeader.match(/\(([^)]+)\)/);
@@ -78,6 +80,7 @@ export function parseSignatureInput(signatureInputHeader: string): {
       algorithm: algMatch?.[1],
       created: createdMatch ? parseInt(createdMatch[1], 10) : undefined,
       expires: expiresMatch ? parseInt(expiresMatch[1], 10) : undefined,
+      nonce: nonceMatch?.[1],
     };
   } catch {
     return null;
