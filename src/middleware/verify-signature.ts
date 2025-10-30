@@ -6,9 +6,9 @@
 import type { Request, Response, NextFunction } from 'express';
 import { webcrypto } from 'node:crypto';
 import { httpbis } from 'http-message-signatures';
+import type { SignatureParameters } from 'http-message-signatures/lib/types';
 import { db } from '../infra/db.js';
 import { verifyDigest } from '../crypto/digest.js';
-import { extractKeyIdFromHeader, parseSignatureInput } from '../crypto/rfc9421.js';
 import { SignatureErrors } from '../shared/errors.js';
 import { logSuccess, logFailure } from '../shared/audit.js';
 
@@ -40,141 +40,21 @@ export async function verifySignatureMiddleware(
     return;
   }
 
-  // Extract key ID from Signature-Input header
-  const kid = extractKeyIdFromHeader(signatureInputHeader as string);
-
-  if (!kid) {
-    res.status(401).json(SignatureErrors.invalidSignature('Missing keyid parameter'));
-    return;
-  }
-
-  // Look up the key
-  const keyRecord = db.getKey(kid);
-
-  if (!keyRecord) {
-    logFailure('unknown', kid, 'unknown_keyid', [], endpoint, method);
-    res.status(401).json(SignatureErrors.unknownKeyId(kid));
-    return;
-  }
-
-  // Check if key is revoked
-  if (keyRecord.status === 'revoked') {
-    logFailure(keyRecord.clientId, kid, 'key_revoked', [], endpoint, method);
-    res.status(401).json(SignatureErrors.revokedKey(kid));
-    return;
-  }
-
-  // Parse signature input to get components for logging
-  const signatureParams = parseSignatureInput(signatureInputHeader as string);
-
-  if (!signatureParams) {
-    logFailure(keyRecord.clientId, kid, 'invalid_signature_input', [], endpoint, method);
-    res.status(401).json(SignatureErrors.invalidSignature('Invalid Signature-Input format'));
-    return;
-  }
-
-  // Check for nonce parameter (optional but recommended for replay protection)
-  if (signatureParams.nonce) {
-    // Check if nonce has been used before (replay detection)
-    if (db.isNonceUsed(signatureParams.nonce)) {
-      logFailure(keyRecord.clientId, kid, 'replay_detected', signatureParams.components || [], endpoint, method);
-      res.status(401).json({
-        type: 'https://datatracker.ietf.org/doc/html/rfc9421#section-2.3',
-        title: 'Replay Attack Detected',
-        status: 401,
-        detail: 'The nonce has already been used. This request appears to be a replay attack.',
-      });
-      return;
-    }
-  }
-
-  // Verify Content-Digest if present
+  // Verify Content-Digest if present (do this early for efficiency)
   if (contentDigestHeader && req.rawBody) {
     const digestValid = verifyDigest(req.rawBody, contentDigestHeader as string);
 
     if (!digestValid) {
-      logFailure(
-        keyRecord.clientId,
-        kid,
-        'digest_mismatch',
-        signatureParams.components || [],
-        endpoint,
-        method
-      );
       res.status(400).json(SignatureErrors.digestMismatch());
       return;
     }
   }
 
+  // Track failure reason from keyLookup callback
+  let failureReason: { clientId: string; kid: string; reason: string; error: any } | undefined;
+
   // Perform cryptographic signature verification
   try {
-    // Import the JWK public key using webcrypto
-    let publicKey: webcrypto.CryptoKey;
-    if (keyRecord.algorithm === 'EdDSA') {
-      publicKey = await webcrypto.subtle.importKey(
-        'jwk',
-        keyRecord.jwk as any,
-        {
-          name: 'Ed25519',
-          namedCurve: 'Ed25519',
-        } as any,
-        true,
-        ['verify']
-      );
-    } else if (keyRecord.algorithm.startsWith('ES')) {
-      // ECDSA keys
-      const namedCurve = keyRecord.algorithm === 'ES256' ? 'P-256' :
-                         keyRecord.algorithm === 'ES384' ? 'P-384' : 'P-521';
-      publicKey = await webcrypto.subtle.importKey(
-        'jwk',
-        keyRecord.jwk,
-        {
-          name: 'ECDSA',
-          namedCurve,
-        },
-        true,
-        ['verify']
-      );
-    } else if (keyRecord.algorithm.startsWith('RS')) {
-      // RSA keys
-      publicKey = await webcrypto.subtle.importKey(
-        'jwk',
-        keyRecord.jwk,
-        {
-          name: 'RSASSA-PKCS1-v1_5',
-          hash: keyRecord.algorithm === 'RS256' ? 'SHA-256' :
-                keyRecord.algorithm === 'RS384' ? 'SHA-384' : 'SHA-512',
-        },
-        true,
-        ['verify']
-      );
-    } else {
-      throw new Error(`Unsupported algorithm: ${keyRecord.algorithm}`);
-    }
-
-    // Create a verifier function using the imported key
-    const createVerifierForKey = async (data: Buffer, signature: Buffer): Promise<boolean | null> => {
-      // Map algorithm names to SubtleCrypto algorithm parameters
-      let algorithm: string | { name: string; hash: string };
-      if (keyRecord.algorithm === 'EdDSA') {
-        // Ed25519 uses 'Ed25519' algorithm name in Web Crypto API
-        algorithm = 'Ed25519';
-      } else if (keyRecord.algorithm === 'ES256') {
-        algorithm = { name: 'ECDSA', hash: 'SHA-256' };
-      } else if (keyRecord.algorithm === 'ES384') {
-        algorithm = { name: 'ECDSA', hash: 'SHA-384' };
-      } else if (keyRecord.algorithm === 'ES512') {
-        algorithm = { name: 'ECDSA', hash: 'SHA-512' };
-      } else if (keyRecord.algorithm === 'RS256') {
-        algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
-      } else {
-        throw new Error(`Unsupported algorithm: ${keyRecord.algorithm}`);
-      }
-
-      // Use crypto.subtle.verify
-      return await webcrypto.subtle.verify(algorithm, publicKey, signature, data);
-    };
-
     // Construct the message object for verification
     const message = {
       method: req.method,
@@ -191,7 +71,6 @@ export async function verifySignatureMiddleware(
 
     // Map algorithm names to library format
     const mapAlgorithmToLibraryFormat = (alg: string): string => {
-      // Map JWK algorithm names to http-message-signatures library format
       const mapping: Record<string, string> = {
         'EdDSA': 'ed25519',
         'ES256': 'ecdsa-p256-sha256',
@@ -204,77 +83,180 @@ export async function verifySignatureMiddleware(
       return mapping[alg] || alg.toLowerCase();
     };
 
-    // Verify the signature using the library
-    // Library handles timestamp validation (created/expires) with tolerance
+    // Clock skew tolerance for timestamp validation
     const CLOCK_SKEW_SECONDS = 5 * 60; // 5 minutes
 
+    // Verify the signature using the library
+    // The keyLookup callback receives parsed parameters from the library
     const verificationResult = await httpbis.verifyMessage(
       {
-        keyLookup: async (params) => {
-          // Return the key details if the keyid matches
-          if (params.keyid === kid) {
-            return {
-              id: kid,
-              algs: [mapAlgorithmToLibraryFormat(keyRecord.algorithm)],
-              verify: createVerifierForKey,
-            };
+        keyLookup: async (params: SignatureParameters) => {
+          const kid = params.keyid;
+
+          if (!kid) {
+            failureReason = { clientId: 'unknown', kid: 'unknown', reason: 'missing_keyid', error: SignatureErrors.invalidSignature('Missing keyid parameter') };
+            return null;
           }
-          return null;
+
+          // Look up the key
+          const keyRecord = db.getKey(kid);
+
+          if (!keyRecord) {
+            logFailure('unknown', kid, 'unknown_keyid', [], endpoint, method);
+            failureReason = { clientId: 'unknown', kid, reason: 'unknown_keyid', error: SignatureErrors.unknownKeyId(kid) };
+            return null;
+          }
+
+          // Check if key is revoked
+          if (keyRecord.status === 'revoked') {
+            logFailure(keyRecord.clientId, kid, 'key_revoked', [], endpoint, method);
+            failureReason = { clientId: keyRecord.clientId, kid, reason: 'key_revoked', error: SignatureErrors.revokedKey(kid) };
+            return null;
+          }
+
+          // Check for nonce parameter (replay protection)
+          if (params.nonce) {
+            // Check if nonce has been used before (replay detection)
+            if (db.isNonceUsed(params.nonce)) {
+              logFailure(keyRecord.clientId, kid, 'replay_detected', [], endpoint, method);
+              failureReason = {
+                clientId: keyRecord.clientId,
+                kid,
+                reason: 'replay_detected',
+                error: {
+                  type: 'https://datatracker.ietf.org/doc/html/rfc9421#section-2.3',
+                  title: 'Replay Attack Detected',
+                  status: 401,
+                  detail: 'The nonce has already been used. This request appears to be a replay attack.',
+                }
+              };
+              return null;
+            }
+          }
+
+          // Import the public key
+          let publicKey: webcrypto.CryptoKey;
+          if (keyRecord.algorithm === 'EdDSA') {
+            publicKey = await webcrypto.subtle.importKey(
+              'jwk',
+              keyRecord.jwk as any,
+              { name: 'Ed25519', namedCurve: 'Ed25519' } as any,
+              true,
+              ['verify']
+            );
+          } else if (keyRecord.algorithm.startsWith('ES')) {
+            const namedCurve = keyRecord.algorithm === 'ES256' ? 'P-256' :
+                               keyRecord.algorithm === 'ES384' ? 'P-384' : 'P-521';
+            publicKey = await webcrypto.subtle.importKey(
+              'jwk',
+              keyRecord.jwk,
+              { name: 'ECDSA', namedCurve },
+              true,
+              ['verify']
+            );
+          } else if (keyRecord.algorithm.startsWith('RS')) {
+            publicKey = await webcrypto.subtle.importKey(
+              'jwk',
+              keyRecord.jwk,
+              {
+                name: 'RSASSA-PKCS1-v1_5',
+                hash: keyRecord.algorithm === 'RS256' ? 'SHA-256' :
+                      keyRecord.algorithm === 'RS384' ? 'SHA-384' : 'SHA-512',
+              },
+              true,
+              ['verify']
+            );
+          } else {
+            throw new Error(`Unsupported algorithm: ${keyRecord.algorithm}`);
+          }
+
+          // Create a verifier function
+          const createVerifierForKey = async (data: Buffer, signature: Buffer): Promise<boolean | null> => {
+            let algorithm: string | { name: string; hash: string };
+            if (keyRecord.algorithm === 'EdDSA') {
+              algorithm = 'Ed25519';
+            } else if (keyRecord.algorithm === 'ES256') {
+              algorithm = { name: 'ECDSA', hash: 'SHA-256' };
+            } else if (keyRecord.algorithm === 'ES384') {
+              algorithm = { name: 'ECDSA', hash: 'SHA-384' };
+            } else if (keyRecord.algorithm === 'ES512') {
+              algorithm = { name: 'ECDSA', hash: 'SHA-512' };
+            } else if (keyRecord.algorithm === 'RS256') {
+              algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+            } else {
+              throw new Error(`Unsupported algorithm: ${keyRecord.algorithm}`);
+            }
+            return await webcrypto.subtle.verify(algorithm, publicKey, signature, data);
+          };
+
+          // Store nonce and params for post-verification processing
+          (req as any)._signatureParams = params;
+          (req as any)._keyRecord = keyRecord;
+
+          // Return the verifying key
+          return {
+            id: kid,
+            algs: [mapAlgorithmToLibraryFormat(keyRecord.algorithm)],
+            verify: createVerifierForKey,
+          };
         },
-        tolerance: CLOCK_SKEW_SECONDS, // Clock skew tolerance for timestamps
+        tolerance: CLOCK_SKEW_SECONDS,
       },
       message
     );
 
+    // Check if verification failed due to specific reason
+    if (failureReason) {
+      res.status(401).json(failureReason.error);
+      return;
+    }
+
     // verifyMessage returns true on success, false/null on failure
     if (!verificationResult) {
-      logFailure(
-        keyRecord.clientId,
-        kid,
-        'signature_verification_failed',
-        signatureParams.components || [],
-        endpoint,
-        method
-      );
+      logFailure('unknown', 'unknown', 'signature_verification_failed', [], endpoint, method);
       res.status(401).json(SignatureErrors.invalidSignature('Signature verification failed'));
       return;
     }
 
-    // Store the nonce to prevent replay (if present)
-    if (signatureParams.nonce) {
-      // Use the expires parameter if available, otherwise use created + 5 minutes
-      const expiresAt = signatureParams.expires
-        ? new Date(signatureParams.expires * 1000)
-        : new Date((signatureParams.created || Math.floor(Date.now() / 1000)) * 1000 + 5 * 60 * 1000);
+    // Retrieve params and keyRecord stored during keyLookup
+    const params = (req as any)._signatureParams as SignatureParameters;
+    const keyRecord = (req as any)._keyRecord;
 
-      db.storeNonce(signatureParams.nonce, expiresAt, keyRecord.clientId, kid);
+    // Store the nonce to prevent replay (if present)
+    if (params.nonce && keyRecord) {
+      // params.expires and params.created are Date objects or numbers (Unix timestamps in seconds)
+      let expiresTime: number;
+
+      if (params.expires instanceof Date) {
+        expiresTime = params.expires.getTime();
+      } else if (typeof params.expires === 'number') {
+        expiresTime = params.expires * 1000;
+      } else if (params.created instanceof Date) {
+        expiresTime = params.created.getTime() + 5 * 60 * 1000;
+      } else if (typeof params.created === 'number') {
+        expiresTime = params.created * 1000 + 5 * 60 * 1000;
+      } else {
+        expiresTime = Date.now() + 5 * 60 * 1000;
+      }
+
+      const expiresAt = new Date(expiresTime);
+
+      db.storeNonce(params.nonce, expiresAt, keyRecord.clientId, params.keyid!);
     }
 
     // Log successful verification
-    logSuccess(
-      keyRecord.clientId,
-      kid,
-      signatureParams.components || [],
-      endpoint,
-      method
-    );
+    if (keyRecord) {
+      logSuccess(keyRecord.clientId, params.keyid!, [], endpoint, method);
 
-    // Set identity on request for downstream handlers
-    req.identity = {
-      clientId: keyRecord.clientId,
-      kid: kid,
-    };
+      // Set identity on request for downstream handlers
+      req.identity = {
+        clientId: keyRecord.clientId,
+        kid: params.keyid!,
+      };
+    }
 
     next();
   } catch (error: any) {
-    logFailure(
-      keyRecord.clientId,
-      kid,
-      'signature_verification_error',
-      signatureParams.components || [],
-      endpoint,
-      method
-    );
     res.status(401).json(SignatureErrors.invalidSignature(error.message || 'Verification error'));
     return;
   }
