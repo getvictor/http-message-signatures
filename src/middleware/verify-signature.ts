@@ -55,14 +55,13 @@ export async function verifySignatureMiddleware(
 
   // Perform cryptographic signature verification
   try {
-    // Construct the message object for verification
+    // Transform Express Request to http-message-signatures's Request interface
+    // Also, RFC 9421 requires lowercase header names for signature verification.
     const message = {
       method: req.method,
       url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
       headers: {} as Record<string, string>,
     };
-
-    // Copy headers to lowercase keys (RFC 9421 requires lowercase)
     for (const [key, value] of Object.entries(req.headers)) {
       if (value !== undefined) {
         message.headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : value;

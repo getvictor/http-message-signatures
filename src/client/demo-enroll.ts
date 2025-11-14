@@ -27,7 +27,7 @@ async function main() {
 
     console.log('\n🎉 Ready for demos!');
     console.log('   Run: npm run demo:good');
-    console.log('   Run: npm run demo:bad\n');
+    console.log('   Run: npm run demo:bad-method\n');
 
     process.exit(0);
   } catch (error: any) {
