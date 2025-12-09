@@ -1,5 +1,7 @@
 # HTTP Message Signatures Demo
 
+Read the accompanying article at: https://victoronsoftware.com/posts/http-message-signatures/
+
 A comprehensive demonstration of **RFC 9421 (HTTP Message Signatures)** and **RFC 9530 (Digest Fields)** with full cryptographic signature verification using Ed25519 keys.
 
 ## Prerequisites
